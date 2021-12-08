@@ -34,7 +34,7 @@ num_cpus = "1.13.0"
 tiny-keccak = { version = "2.0.2", default-features = false }
 
 [target.'cfg(not(any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
-sha2 = { version = "0.9.8", default-features = false }
+sha2 = { version = "0.10.0", default-features = false }
 
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
 sha2 = { version = "0.9.8", default-features = false, features = ["asm"] }
