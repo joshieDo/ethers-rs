@@ -6,6 +6,7 @@ use crate::error::SolcError;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use semver::Version;
+use tiny_keccak::{Hasher, Keccak};
 use walkdir::WalkDir;
 
 /// A regex that matches the import path and identifier of a solidity import
@@ -48,17 +49,16 @@ pub fn find_version_pragma(contract: &str) -> Option<&str> {
 ///
 /// ```no_run
 /// use ethers_solc::utils;
-/// let sources = utils::source_files("./contracts").unwrap();
+/// let sources = utils::source_files("./contracts");
 /// ```
-pub fn source_files(root: impl AsRef<Path>) -> walkdir::Result<Vec<PathBuf>> {
-    let files = WalkDir::new(root)
+pub fn source_files(root: impl AsRef<Path>) -> Vec<PathBuf> {
+    WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .filter(|e| e.path().extension().map(|ext| ext == "sol").unwrap_or_default())
         .map(|e| e.path().into())
-        .collect();
-    Ok(files)
+        .collect()
 }
 
 /// Returns the source name for the given source path, the ancestors of the root path
@@ -123,6 +123,34 @@ pub fn installed_versions(root: impl AsRef<Path>) -> Result<Vec<Version>, SolcEr
     Ok(versions)
 }
 
+/// Returns the 36 char (deprecated) fully qualified name placeholder
+///
+/// If the name is longer than 36 char, then the name gets truncated,
+/// If the name is shorter than 36 char, then the name is filled with trailing `_`
+pub fn library_fully_qualified_placeholder(name: impl AsRef<str>) -> String {
+    name.as_ref().chars().chain(std::iter::repeat('_')).take(36).collect()
+}
+
+/// Returns the library hash placeholder as `$hex(library_hash(name))$`
+pub fn library_hash_placeholder(name: impl AsRef<[u8]>) -> String {
+    let hash = library_hash(name);
+    let placeholder = hex::encode(hash);
+    format!("${}$", placeholder)
+}
+
+/// Returns the library placeholder for the given name
+/// The placeholder is a 34 character prefix of the hex encoding of the keccak256 hash of the fully
+/// qualified library name.
+///
+/// See also https://docs.soliditylang.org/en/develop/using-the-compiler.html#library-linking
+pub fn library_hash(name: impl AsRef<[u8]>) -> [u8; 17] {
+    let mut output = [0u8; 17];
+    let mut hasher = Keccak::v256();
+    hasher.update(name.as_ref());
+    hasher.finalize(&mut output);
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,7 +191,7 @@ mod tests {
         File::create(&file_c).unwrap();
         File::create(&file_d).unwrap();
 
-        let files: HashSet<_> = source_files(tmp_dir.path()).unwrap().into_iter().collect();
+        let files: HashSet<_> = source_files(tmp_dir.path()).into_iter().collect();
         let expected: HashSet<_> = [file_a, file_b, file_c, file_d].into();
         assert_eq!(files, expected);
     }

@@ -12,13 +12,24 @@
   [597](https://github.com/gakonst/ethers-rs/pull/597)
 - Implement hex display format for `ethers::core::Bytes`
   [#624](https://github.com/gakonst/ethers-rs/pull/624).
+- Fix `fee_history` to first try with `block_count` encoded as a hex `QUANTITY`.
+  [#668](https://github.com/gakonst/ethers-rs/pull/668)
+
+## ethers-contract-abigen
+
+- Implement snowtrace and polygonscan on par with the etherscan integration
+  [#666](https://github.com/gakonst/ethers-rs/pull/666).
 
 ## ethers-solc
 
 ### Unreleased
 
+- Add support for hardhat artifacts [#677](https://github.com/gakonst/ethers-rs/pull/677)
+- Add more utility functions to the `Artifact` trait [#673](https://github.com/gakonst/ethers-rs/pull/673)
 - Return cached artifacts from project `compile` when the cache only contains
   some files
+- Add support for library linking and make `Bytecode`'s `object` filed an `enum BytecodeObject`
+  [#656](https://github.com/gakonst/ethers-rs/pull/656).
 
 ### 0.6.0
 
@@ -92,6 +103,8 @@
 
 ### Unreleased
 
+- Substitute output tuples with rust struct types for function calls
+  [#664](https://github.com/gakonst/ethers-rs/pull/664)
 - Add AbiType implementation during EthAbiType expansion
   [#647](https://github.com/gakonst/ethers-rs/pull/647)
 - fix Etherscan conditional HTTP support

@@ -6,6 +6,8 @@ pub use artifacts::{CompilerInput, CompilerOutput, EvmVersion};
 use std::collections::btree_map::Entry;
 
 pub mod cache;
+pub mod hh;
+pub use hh::{HardhatArtifact, HardhatArtifacts};
 
 mod compile;
 
@@ -25,12 +27,20 @@ use crate::{artifacts::Source, cache::SolFilesCache};
 pub mod error;
 pub mod utils;
 
-use crate::{artifacts::Sources, cache::PathMap};
+use crate::{
+    artifacts::Sources,
+    cache::PathMap,
+    error::{SolcError, SolcIoError},
+};
 use error::Result;
 use std::{
-    borrow::Cow, collections::BTreeMap, convert::TryInto, fmt, fs, io, marker::PhantomData,
+    borrow::Cow, collections::BTreeMap, convert::TryInto, fmt, fs, marker::PhantomData,
     path::PathBuf,
 };
+
+/// Utilities for creating, mocking and testing of (temporary) projects
+#[cfg(feature = "project-util")]
+pub mod project_util;
 
 /// Represents a project workspace and handles `solc` compiling of all contracts in that workspace.
 #[derive(Debug)]
@@ -88,6 +98,21 @@ impl Project {
 }
 
 impl<Artifacts: ArtifactOutput> Project<Artifacts> {
+    /// Returns the path to the artifacts directory
+    pub fn artifacts_path(&self) -> &PathBuf {
+        &self.paths.artifacts
+    }
+
+    /// Returns the path to the sources directory
+    pub fn sources_path(&self) -> &PathBuf {
+        &self.paths.sources
+    }
+
+    /// Returns the path to the cache file
+    pub fn cache_path(&self) -> &PathBuf {
+        &self.paths.cache
+    }
+
     /// Sets the maximum number of parallel `solc` processes to run simultaneously.
     pub fn set_solc_jobs(&mut self, jobs: usize) {
         assert!(jobs > 0);
@@ -116,7 +141,7 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
 
         if let Some(cache_dir) = self.paths.cache.parent() {
             tracing::trace!("creating cache file parent directory \"{}\"", cache_dir.display());
-            fs::create_dir_all(cache_dir)?
+            fs::create_dir_all(cache_dir).map_err(|err| SolcError::io(err, cache_dir))?
         }
 
         tracing::trace!("writing cache file to \"{}\"", self.paths.cache.display());
@@ -127,9 +152,9 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
 
     /// Returns all sources found under the project's configured sources path
     #[tracing::instrument(skip_all, fields(name = "sources"))]
-    pub fn sources(&self) -> io::Result<Sources> {
+    pub fn sources(&self) -> Result<Sources> {
         tracing::trace!("reading all sources from \"{}\"", self.paths.sources.display());
-        Source::read_all_from(&self.paths.sources)
+        Ok(Source::read_all_from(&self.paths.sources)?)
     }
 
     /// This emits the cargo [`rerun-if-changed`](https://doc.rust-lang.org/cargo/reference/build-scripts.html#cargorerun-if-changedpath) instruction.
@@ -160,7 +185,7 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     fn resolved_libraries(
         &self,
         sources: &Sources,
-    ) -> io::Result<BTreeMap<PathBuf, (Source, PathBuf)>> {
+    ) -> Result<BTreeMap<PathBuf, (Source, PathBuf)>> {
         let mut libs = BTreeMap::default();
         for source in sources.values() {
             for import in source.parse_imports() {
@@ -372,6 +397,7 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
         let sources = paths.set_source_names(sources);
 
         let input = CompilerInput::with_sources(sources)
+            .evm_version(self.solc_config.settings.evm_version.unwrap_or_default())
             .normalize_evm_version(&solc.version()?)
             .with_remappings(self.paths.remappings.clone());
 
@@ -460,15 +486,17 @@ impl<Artifacts: ArtifactOutput> Project<Artifacts> {
     }
 
     /// Removes the project's artifacts and cache file
-    pub fn cleanup(&self) -> Result<()> {
+    pub fn cleanup(&self) -> std::result::Result<(), SolcIoError> {
         tracing::trace!("clean up project");
-        if self.paths.cache.exists() {
-            std::fs::remove_file(&self.paths.cache)?;
-            tracing::trace!("removed cache file \"{}\"", self.paths.cache.display());
+        if self.cache_path().exists() {
+            std::fs::remove_file(self.cache_path())
+                .map_err(|err| SolcIoError::new(err, self.cache_path()))?;
+            tracing::trace!("removed cache file \"{}\"", self.cache_path().display());
         }
         if self.paths.artifacts.exists() {
-            std::fs::remove_dir_all(&self.paths.artifacts)?;
-            tracing::trace!("removed artifacts dir \"{}\"", self.paths.artifacts.display());
+            std::fs::remove_dir_all(self.artifacts_path())
+                .map_err(|err| SolcIoError::new(err, self.artifacts_path().clone()))?;
+            tracing::trace!("removed artifacts dir \"{}\"", self.artifacts_path().display());
         }
         Ok(())
     }
@@ -762,14 +790,12 @@ impl<T: ArtifactOutput> ProjectCompileOutput<T> {
     }
 
     /// Finds the first contract with the given name and removes it from the set
-    pub fn remove(&mut self, contract: impl AsRef<str>) -> Option<T::Artifact> {
-        let contract = contract.as_ref();
+    pub fn remove(&mut self, contract_name: impl AsRef<str>) -> Option<T::Artifact> {
+        let contract_name = contract_name.as_ref();
         if let Some(output) = self.compiler_output.as_mut() {
-            if let contract @ Some(_) = output
-                .contracts
-                .values_mut()
-                .find_map(|c| c.remove(contract).map(T::contract_to_artifact))
-            {
+            if let contract @ Some(_) = output.contracts.iter_mut().find_map(|(file, c)| {
+                c.remove(contract_name).map(|c| T::contract_to_artifact(file, contract_name, c))
+            }) {
                 return contract
             }
         }
@@ -777,7 +803,7 @@ impl<T: ArtifactOutput> ProjectCompileOutput<T> {
             .artifacts
             .iter()
             .find_map(|(path, _)| {
-                T::contract_name(path).filter(|name| name == contract).map(|_| path)
+                T::contract_name(path).filter(|name| name == contract_name).map(|_| path)
             })?
             .clone();
         self.artifacts.remove(&key)
@@ -789,17 +815,20 @@ where
     T::Artifact: Clone,
 {
     /// Finds the first contract with the given name
-    pub fn find(&self, contract: impl AsRef<str>) -> Option<Cow<T::Artifact>> {
-        let contract = contract.as_ref();
+    pub fn find(&self, contract_name: impl AsRef<str>) -> Option<Cow<T::Artifact>> {
+        let contract_name = contract_name.as_ref();
         if let Some(output) = self.compiler_output.as_ref() {
-            if let contract @ Some(_) = output.contracts.values().find_map(|c| {
-                c.get(contract).map(|c| T::contract_to_artifact(c.clone())).map(Cow::Owned)
+            if let contract @ Some(_) = output.contracts.iter().find_map(|(file, contracts)| {
+                contracts
+                    .get(contract_name)
+                    .map(|c| T::contract_to_artifact(file, contract_name, c.clone()))
+                    .map(Cow::Owned)
             }) {
                 return contract
             }
         }
         self.artifacts.iter().find_map(|(path, art)| {
-            T::contract_name(path).filter(|name| name == contract).map(|_| Cow::Borrowed(art))
+            T::contract_name(path).filter(|name| name == contract_name).map(|_| Cow::Borrowed(art))
         })
     }
 }
